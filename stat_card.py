@@ -16,6 +16,18 @@ from PIL import Image
 
 ASSET_DIR = Path(__file__).resolve().parent
 
+# Source template geometry (blank_stats at 759×1024) → scaled to CARD size.
+_BLANK_W, _BLANK_H = 759, 1024
+CARD_W, CARD_H = 204, 275
+_SCALE_X = CARD_W / _BLANK_W
+_SCALE_Y = CARD_H / _BLANK_H
+_GRID_LEFT, _GRID_RIGHT, _GRID_TOP, _GRID_BOTTOM = 42, 717, 38, 932
+_COL_W = (_GRID_RIGHT - _GRID_LEFT) / 3
+_ROW_H = (_GRID_BOTTOM - _GRID_TOP) / 8
+# Anchor within each cell (right of icon, vertically centred on level text).
+_CELL_X_FRAC = 0.62
+_CELL_Y_FRAC = 0.55
+
 # Column-major skill order matching the live OSRS Skills tab.
 SKILL_COLUMNS: list[list[str]] = [
     ["attack", "strength", "defence", "ranged", "prayer", "magic", "cooking", "woodcutting"],
@@ -25,25 +37,33 @@ SKILL_COLUMNS: list[list[str]] = [
 
 SKILL_LIST: list[str] = [skill for column in SKILL_COLUMNS for skill in column]
 
-ICON_X = (42, 105, 168)
-DIGIT_X = (59, 122, 185)
-ROW_ICON_Y = (13, 45, 77, 109, 141, 173, 205, 237)
-ROW_DIGIT_Y = (26, 58, 90, 122, 154, 186, 218, 250)
-
-TOTAL_LEVEL_POSITION = (155, 250)
+# Render tuning — adjust when iterating on Card.png alignment.
+SKILL_LEVEL_HEIGHT = 11
+TOTAL_LEVEL_HEIGHT = 13
+TWO_DIGIT_X_NUDGE = 3
 
 
-def _build_skill_positions() -> dict[str, tuple[tuple[int, int], tuple[int, int]]]:
-    positions: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {}
+def _cell_digit_pos(col: int, row: int) -> tuple[int, int]:
+    x = int((_GRID_LEFT + col * _COL_W + _COL_W * _CELL_X_FRAC) * _SCALE_X)
+    y = int((_GRID_TOP + row * _ROW_H + _ROW_H * _CELL_Y_FRAC) * _SCALE_Y)
+    return x, y
+
+
+def _build_skill_positions() -> dict[str, tuple[int, int]]:
+    positions: dict[str, tuple[int, int]] = {}
     for col_idx, column in enumerate(SKILL_COLUMNS):
         for row_idx, skill in enumerate(column):
-            icon_pos = (ICON_X[col_idx], ROW_ICON_Y[row_idx])
-            digit_pos = (DIGIT_X[col_idx], ROW_DIGIT_Y[row_idx])
-            positions[skill] = (icon_pos, digit_pos)
+            positions[skill] = _cell_digit_pos(col_idx, row_idx)
     return positions
 
 
 SKILL_POSITIONS = _build_skill_positions()
+
+# Centre of the total-level bar at the bottom of the tab.
+TOTAL_LEVEL_POSITION = (
+    int((_GRID_LEFT + _GRID_RIGHT) / 2 * _SCALE_X),
+    int((_GRID_BOTTOM + (_BLANK_H - _GRID_BOTTOM) * 0.45) * _SCALE_Y),
+)
 
 # Display names for the Tkinter UI.
 SKILL_LABELS: dict[str, str] = {
@@ -60,13 +80,6 @@ def resource_path(relative_path: str | os.PathLike[str]) -> str:
     except AttributeError:
         base_path = str(ASSET_DIR)
     return os.path.join(base_path, os.fspath(relative_path))
-
-
-def _images_dir() -> str:
-    """Writable directory for temporary digit composites (Lambda /var/task is read-only)."""
-    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "osrs_stat_card")
-    os.makedirs(path, exist_ok=True)
-    return path
 
 
 def _digit_image_path(digit: str) -> str:
@@ -90,29 +103,22 @@ def _render_digit_image(num: int) -> Image.Image:
     return Image.open(_digit_image_path(num_str)).copy()
 
 
-def _create_digit_image(num: int, suffix: str) -> str:
-    """Render level digits to a temporary PNG; return its path (local GUI use)."""
-    out_path = os.path.join(_images_dir(), f"{num}{suffix}.png")
-    _render_digit_image(num).save(out_path, format="PNG")
-    return out_path
+def _scale_to_height(img: Image.Image, height: int) -> Image.Image:
+    w, h = img.size
+    if h <= 0:
+        return img
+    width = max(1, round(w * height / h))
+    return img.resize((width, height), Image.Resampling.NEAREST)
 
 
-def _paste_level(
-    background: Image.Image,
-    level: int,
-    skill: str,
-) -> None:
-    icon_pos, digit_pos = SKILL_POSITIONS[skill]
-    front = _render_digit_image(level)
-    size = (10, 10) if level < 10 else (15, 15)
-    front.thumbnail(size, Image.Resampling.LANCZOS)
+def _paste_level(background: Image.Image, level: int, skill: str) -> None:
+    pos = SKILL_POSITIONS[skill]
+    front = _scale_to_height(_render_digit_image(level), SKILL_LEVEL_HEIGHT)
     front = front.convert("RGBA")
-
-    background.paste(front, icon_pos, front)
-    if level < 10:
-        background.paste(front, digit_pos, front)
-    else:
-        background.paste(front, (digit_pos[0] - 5, digit_pos[1]), front)
+    x, y = pos
+    if level >= 10:
+        x -= TWO_DIGIT_X_NUDGE
+    background.paste(front, (x, y), front)
 
 
 def _paste_total(background: Image.Image, total: int) -> None:
@@ -123,20 +129,11 @@ def _paste_total(background: Image.Image, total: int) -> None:
         digit = Image.open(_digit_image_path(ch))
         canvas.paste(digit, (i * 25, 0), digit.convert("RGBA"))
 
-    front = canvas
-    if total > 999:
-        size = (25, 25)
-        position = TOTAL_LEVEL_POSITION
-    elif total > 99:
-        size = (19, 19)
-        position = (TOTAL_LEVEL_POSITION[0] + 3, TOTAL_LEVEL_POSITION[1])
-    else:
-        size = (15, 15)
-        position = (TOTAL_LEVEL_POSITION[0] + 5, TOTAL_LEVEL_POSITION[1])
-
-    front.thumbnail(size, Image.Resampling.LANCZOS)
+    front = _scale_to_height(canvas, TOTAL_LEVEL_HEIGHT)
     front = front.convert("RGBA")
-    background.paste(front, position, front)
+    x = TOTAL_LEVEL_POSITION[0] - front.width // 2
+    y = TOTAL_LEVEL_POSITION[1] - front.height // 2
+    background.paste(front, (x, y), front)
 
 
 def render_stat_card(levels: dict[str, int], total: int | None = None) -> Image.Image:
