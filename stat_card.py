@@ -63,7 +63,8 @@ def resource_path(relative_path: str | os.PathLike[str]) -> str:
 
 
 def _images_dir() -> str:
-    path = resource_path("images")
+    """Writable directory for temporary digit composites (Lambda /var/task is read-only)."""
+    path = os.path.join(os.environ.get("TMPDIR", "/tmp"), "osrs_stat_card")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -77,21 +78,22 @@ def _digit_image_path(digit: str) -> str:
     raise FileNotFoundError(f"Digit sprite not found for {digit!r}")
 
 
-def _create_digit_image(num: int, suffix: str) -> str:
-    """Render level digits to a temporary PNG; return its path."""
+def _render_digit_image(num: int) -> Image.Image:
+    """Composite level digits into a single RGBA image."""
     num_str = str(num)
-    out_path = os.path.join(_images_dir(), f"{num_str}{suffix}.png")
-
     if len(num_str) > 1:
         canvas = Image.new("RGBA", (50, 60), (0, 0, 0, 0))
         for i, ch in enumerate(num_str):
             digit = Image.open(_digit_image_path(ch))
             canvas.paste(digit, (i * 24, 0), digit.convert("RGBA"))
-    else:
-        digit = Image.open(_digit_image_path(num_str))
-        canvas = digit.copy()
+        return canvas
+    return Image.open(_digit_image_path(num_str)).copy()
 
-    canvas.save(out_path, format="PNG")
+
+def _create_digit_image(num: int, suffix: str) -> str:
+    """Render level digits to a temporary PNG; return its path (local GUI use)."""
+    out_path = os.path.join(_images_dir(), f"{num}{suffix}.png")
+    _render_digit_image(num).save(out_path, format="PNG")
     return out_path
 
 
@@ -101,8 +103,7 @@ def _paste_level(
     skill: str,
 ) -> None:
     icon_pos, digit_pos = SKILL_POSITIONS[skill]
-    digit_path = _create_digit_image(level, skill)
-    front = Image.open(digit_path)
+    front = _render_digit_image(level)
     size = (10, 10) if level < 10 else (15, 15)
     front.thumbnail(size, Image.Resampling.LANCZOS)
     front = front.convert("RGBA")
@@ -116,16 +117,13 @@ def _paste_level(
 
 def _paste_total(background: Image.Image, total: int) -> None:
     num_str = str(total)
-    out_path = os.path.join(_images_dir(), f"{num_str}total.png")
-
     width = 25 * len(num_str)
     canvas = Image.new("RGBA", (width, 60), (0, 0, 0, 0))
     for i, ch in enumerate(num_str):
         digit = Image.open(_digit_image_path(ch))
         canvas.paste(digit, (i * 25, 0), digit.convert("RGBA"))
-    canvas.save(out_path, format="PNG")
 
-    front = Image.open(out_path)
+    front = canvas
     if total > 999:
         size = (25, 25)
         position = TOTAL_LEVEL_POSITION
